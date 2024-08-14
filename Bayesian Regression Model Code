@@ -1,0 +1,192 @@
+import pandas as pd
+import numpy as np
+import pymc3 as pm
+import arviz as az
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+import os
+
+def train_complex_bayesian_model(train_csv_path, test_csv_path, output_summary_csv):
+    """
+    Trains a complex Bayesian model on the provided training data and evaluates it on the test data.
+
+    Parameters:
+    - train_csv_path (str): Path to the CSV file containing the training data.
+    - test_csv_path (str): Path to the CSV file containing the test data.
+    - output_summary_csv (str): Path to save the summary CSV output.
+
+    Returns:
+    - model: The PyMC3 model object.
+    - trace: The trace from the MCMC sampling.
+    - hdi_wellbeing: Highest Density Interval for wellbeing parameters.
+    - hdi_illbeing: Highest Density Interval for illbeing parameters.
+    - rope_wellbeing: Region of Practical Equivalence for wellbeing parameters.
+    - rope_illbeing: Region of Practical Equivalence for illbeing parameters.
+    """
+    
+    if not os.path.exists(train_csv_path):
+        raise FileNotFoundError(f"Training data file not found: {train_csv_path}")
+    if not os.path.exists(test_csv_path):
+        raise FileNotFoundError(f"Test data file not found: {test_csv_path}")
+
+    train_data = pd.read_csv(train_csv_path)
+    train_data.replace('Missing', np.nan, inplace=True)
+    train_data.dropna(inplace=True)
+    train_data = train_data.apply(pd.to_numeric, errors='coerce')
+
+    predictors_wellbeing = ['RMSSD', 'Resilience', 'Values', 'SocialConnectedness']
+    predictors_illbeing = ['LifetimeAdversity', 'Resilience', 'Values', 'SocialConnectedness']
+    target_wellbeing = 'SubjectiveWellbeing'
+    target_illbeing = 'SubjectiveIllbeing'
+    
+    for feature in ['Values', 'SocialConnectedness', 'Resilience']:
+        train_data[f'{feature}_cubic'] = train_data[feature] ** 3
+
+    train_data['RMSSD_exp'] = np.exp(train_data['RMSSD'])
+    train_data['LifetimeAdversity_log'] = np.log(train_data['LifetimeAdversity'] + 1)
+    train_data['Illbeing_log'] = np.log(train_data[target_illbeing] + 1)  # Add logarithmic term for illbeing
+    
+    X_train_wellbeing = train_data[['RMSSD_exp', 'Values_cubic', 'SocialConnectedness_cubic', 'Resilience_cubic', 'Illbeing_log']]
+    X_train_illbeing = train_data[['LifetimeAdversity_log', 'Values_cubic', 'SocialConnectedness_cubic', 'Resilience_cubic']]
+    y_train_wellbeing = train_data[target_wellbeing]
+    y_train_illbeing = train_data[target_illbeing]
+
+    means = train_data.mean()
+    stds = train_data.std()
+    
+    with pm.Model() as model:
+        X_wellbeing_shared = pm.Data('X_wellbeing', X_train_wellbeing)
+        X_illbeing_shared = pm.Data('X_illbeing', X_train_illbeing)
+        y_wellbeing_shared = pm.Data('y_wellbeing', y_train_wellbeing)
+        y_illbeing_shared = pm.Data('y_illbeing', y_train_illbeing)
+        
+        intercept_wellbeing = pm.Normal('intercept_wellbeing', mu=0, sigma=10)
+        intercept_illbeing = pm.Normal('intercept_illbeing', mu=0, sigma=10)
+
+        coefs_wellbeing = {
+            'RMSSD_exp': pm.Normal('RMSSD_exp_wellbeing', mu=0, sigma=1),
+            'Values_cubic': pm.Normal('Values_cubic_wellbeing', mu=0, sigma=1),
+            'SocialConnectedness_cubic': pm.Normal('SocialConnectedness_cubic_wellbeing', mu=0, sigma=1),
+            'Resilience_cubic': pm.Normal('Resilience_cubic_wellbeing', mu=0, sigma=1),
+            'Illbeing_log': pm.Normal('Illbeing_log_wellbeing', mu=0, sigma=1)  # Add coefficient for illbeing log term
+        }
+
+        coefs_illbeing = {
+            'LifetimeAdversity_log': pm.Normal('LifetimeAdversity_log_illbeing', mu=0, sigma=1),
+            'Values_cubic': pm.Normal('Values_cubic_illbeing', mu=0, sigma=1),
+            'SocialConnectedness_cubic': pm.Normal('SocialConnectedness_cubic_illbeing', mu=0, sigma=1),
+            'Resilience_cubic': pm.Normal('Resilience_cubic_illbeing', mu=0, sigma=1)
+        }
+
+        sigma_wellbeing = pm.HalfNormal('sigma_wellbeing', sigma=10)
+        sigma_illbeing = pm.HalfNormal('sigma_illbeing', sigma=10)
+
+        mu_wellbeing = intercept_wellbeing + coefs_wellbeing['RMSSD_exp'] * X_wellbeing_shared[:, 0] + \
+                       coefs_wellbeing['Values_cubic'] * X_wellbeing_shared[:, 1] + \
+                       coefs_wellbeing['SocialConnectedness_cubic'] * X_wellbeing_shared[:, 2] + \
+                       coefs_wellbeing['Resilience_cubic'] * X_wellbeing_shared[:, 3] + \
+                       coefs_wellbeing['Illbeing_log'] * X_wellbeing_shared[:, 4]  # Ensure the 5th column is used here
+                       
+        mu_illbeing = intercept_illbeing + coefs_illbeing['LifetimeAdversity_log'] * X_illbeing_shared[:, 0] + \
+                      coefs_illbeing['Values_cubic'] * X_illbeing_shared[:, 1] + \
+                      coefs_illbeing['SocialConnectedness_cubic'] * X_illbeing_shared[:, 2] + \
+                      coefs_illbeing['Resilience_cubic'] * X_illbeing_shared[:, 3]
+
+        subjective_wellbeing_obs = pm.Normal('subjective_wellbeing_obs', mu=mu_wellbeing, sigma=sigma_wellbeing, observed=y_wellbeing_shared)
+        subjective_illbeing_obs = pm.Normal('subjective_illbeing_obs', mu=mu_illbeing, sigma=sigma_illbeing, observed=y_illbeing_shared)
+
+        trace = pm.sample(1000, tune=2000, cores=1, target_accept=0.95)
+        inference_data = az.from_pymc3(trace)
+
+        waic_wellbeing = az.waic(inference_data, var_name="subjective_wellbeing_obs")
+        loo_wellbeing = az.loo(inference_data, var_name="subjective_wellbeing_obs")
+
+        waic_illbeing = az.waic(inference_data, var_name="subjective_illbeing_obs")
+        loo_illbeing = az.loo(inference_data, var_name="subjective_illbeing_obs")
+
+        print(f'WAIC (Wellbeing): {waic_wellbeing}')
+        print(f'LOO (Wellbeing): {loo_wellbeing}')
+        print(f'WAIC (Illbeing): {waic_illbeing}')
+        print(f'LOO (Illbeing): {loo_illbeing}')
+
+        summary = pm.summary(trace)
+        summary.to_csv(output_summary_csv)
+        print(f'Summary statistics saved to {output_summary_csv}')
+
+        hdi_wellbeing = az.hdi(trace, hdi_prob=0.94)
+        hdi_illbeing = az.hdi(trace, hdi_prob=0.94)
+
+        rope_wellbeing = {}
+        rope_illbeing = {}
+
+        rope_bounds_wellbeing = {
+            'RMSSD_exp': (-0.1 * 0.008, 0.1 * 0.008),
+            'Values_cubic': (-0.1 * 0.015, 0.1 * 0.015),
+            'SocialConnectedness_cubic': (-0.1 * 0.008, 0.1 * 0.008),
+            'Resilience_cubic': (-0.1 * 0.013, 0.1 * 0.013),
+            'Illbeing_log': (-0.1 * 0.02, 0.1 * 0.02)  # ROPE bounds for illbeing log term
+        }
+        rope_bounds_illbeing = {
+            'LifetimeAdversity_log': (-0.1 * 0.014, 0.1 * 0.014),
+            'Values_cubic': (-0.1 * 0.015, 0.1 * 0.015),
+            'SocialConnectedness_cubic': (-0.1 * 0.009, 0.1 * 0.009),
+            'Resilience_cubic': (-0.1 * 0.013, 0.1 * 0.013)
+        }
+
+        for var, bounds in rope_bounds_wellbeing.items():
+            rope_wellbeing[var] = ((trace[f'{var}_wellbeing'] > bounds[0]) & (trace[f'{var}_wellbeing'] < bounds[1])).mean()
+
+        for var, bounds in rope_bounds_illbeing.items():
+            rope_illbeing[var] = ((trace[f'{var}_illbeing'] > bounds[0]) & (trace[f'{var}_illbeing'] < bounds[1])).mean()
+
+        print(f'ROPE (Wellbeing): {rope_wellbeing}')
+        print(f'ROPE (Illbeing): {rope_illbeing}')
+
+        test_data = pd.read_csv(test_csv_path)
+        test_data.replace('Missing', np.nan, inplace=True)
+        test_data.dropna(inplace=True)
+        test_data = test_data.apply(pd.to_numeric, errors='coerce')
+
+        for feature in ['Values', 'SocialConnectedness', 'Resilience']:
+            test_data[f'{feature}_cubic'] = test_data[feature] ** 3
+
+        test_data['RMSSD_exp'] = np.exp(test_data['RMSSD'])
+        test_data['LifetimeAdversity_log'] = np.log(test_data['LifetimeAdversity'] + 1)
+        test_data['Illbeing_log'] = np.log(test_data[target_illbeing] + 1)  # Add illbeing log term
+        
+        X_test_wellbeing = test_data[['RMSSD_exp', 'Values_cubic', 'SocialConnectedness_cubic', 'Resilience_cubic', 'Illbeing_log']]
+        X_test_illbeing = test_data[['LifetimeAdversity_log', 'Values_cubic', 'SocialConnectedness_cubic', 'Resilience_cubic']]
+        y_test_wellbeing = test_data[target_wellbeing]
+        y_test_illbeing = test_data[target_illbeing]
+
+        pm.set_data({
+            'X_wellbeing': X_test_wellbeing,
+            'X_illbeing': X_test_illbeing,
+            'y_wellbeing': y_test_wellbeing,
+            'y_illbeing': y_test_illbeing
+        })
+
+        posterior_predictive = pm.sample_posterior_predictive(trace)
+
+    predicted_wellbeing = posterior_predictive['subjective_wellbeing_obs'].mean(axis=0)
+    predicted_illbeing = posterior_predictive['subjective_illbeing_obs'].mean(axis=0)
+
+    test_data['PredictedSubjectiveWellbeing'] = predicted_wellbeing
+    test_data['PredictedSubjectiveIllbeing'] = predicted_illbeing
+    test_data.to_csv(os.path.join('results', 'PredictedTestDataset.csv'), index=False)
+
+    mae_wellbeing = mean_absolute_error(y_test_wellbeing, predicted_wellbeing)
+    rmse_wellbeing = mean_squared_error(y_test_wellbeing, predicted_wellbeing, squared=False)
+    r2_wellbeing = r2_score(y_test_wellbeing, predicted_wellbeing)
+
+    mae_illbeing = mean_absolute_error(y_test_illbeing, predicted_illbeing)
+    rmse_illbeing = mean_squared_error(y_test_illbeing, predicted_illbeing, squared=False)
+    r2_illbeing = r2_score(y_test_illbeing, predicted_illbeing)
+
+    print(f'Mean Absolute Error (MAE) - Wellbeing: {mae_wellbeing}')
+    print(f'Root Mean Squared Error (RMSE) - Wellbeing: {rmse_wellbeing}')
+    print(f'R-squared - Wellbeing: {r2_wellbeing}')
+    print(f'Mean Absolute Error (MAE) - Illbeing: {mae_illbeing}')
+    print(f'Root Mean Squared Error (RMSE) - Illbeing: {rmse_illbeing}')
+    print(f'R-squared - Illbeing: {r2_illbeing}')
+
+    return model, trace, hdi_wellbeing, hdi_illbeing, rope_wellbeing, rope_illbeing
