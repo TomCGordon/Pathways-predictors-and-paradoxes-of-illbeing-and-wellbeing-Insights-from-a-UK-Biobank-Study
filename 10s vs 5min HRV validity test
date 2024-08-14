@@ -1,0 +1,89 @@
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+
+def load_data(filepath):
+    """
+    Loads the dataset for validity testing.
+
+    Args:
+        filepath (str): Path to the CSV file containing the data.
+
+    Returns:
+        pd.DataFrame: Loaded dataset.
+    """
+    data = pd.read_csv(filepath)
+    return data
+
+def descriptive_statistics(data):
+    """
+    Prints descriptive statistics for RMSSD and meanHR.
+
+    Args:
+        data (pd.DataFrame): The dataset.
+    """
+    print("Descriptive Statistics for RMSSD:")
+    print(data[["10s_1_RMSSD", "5min_1_RMSSD"]].describe())
+    print()
+
+    print("Descriptive Statistics for meanHR:")
+    print(data[["10s_1_MeanHR", "5min_1_MeanHR"]].describe())
+    print()
+
+def bland_altman_plot(data):
+    """
+    Creates a Bland-Altman plot.
+
+    Args:
+        data (pd.DataFrame): The dataset.
+    """
+    plt.figure(figsize=(10, 6))
+    diff = data["10s_1_RMSSD"] - data["5min_1_RMSSD"]
+    mean_diff = np.mean(diff)
+    plt.scatter(data["5min_1_RMSSD"], diff, alpha=0.5)
+    plt.axhline(mean_diff, color='red', linestyle='--', label='Bias')
+    plt.axhline(mean_diff + 25, color='green', linestyle='--', label='+1.96 SD')
+    plt.axhline(mean_diff - 25, color='green', linestyle='--', label='-1.96 SD')
+    plt.title("Bland-Altman Plot")
+    plt.xlabel("Long RMSSD")
+    plt.ylabel("Difference (Short RMSSD - Long RMSSD)")
+    plt.legend()
+    plt.show()
+
+    return mean_diff
+
+def regression_analysis(data):
+    """
+    Performs regression analysis and returns the model results.
+
+    Args:
+        data (pd.DataFrame): The dataset.
+
+    Returns:
+        sm.regression.linear_model.RegressionResultsWrapper: The regression model results.
+    """
+    x1 = data["10s_1_RMSSD"]
+    y = data["5min_1_RMSSD"]
+
+    # Add constant to the predictors
+    x1 = sm.add_constant(x1)
+
+    # Fit the regression model
+    model1 = sm.OLS(y, x1).fit()
+
+    return model1
+
+def calculate_additional_info(diff):
+    """
+    Calculates and returns additional statistical information.
+
+    Args:
+        diff (np.ndarray): Differences between short and long RMSSD.
+
+    Returns:
+        float: Absolute mean difference for 80% of participants.
+    """
+    diff_sorted = np.sort(np.abs(diff))
+    percentile_80 = np.percentile(diff_sorted, 80)
+    return percentile_80
