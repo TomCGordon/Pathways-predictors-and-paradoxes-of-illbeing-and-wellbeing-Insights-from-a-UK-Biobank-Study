@@ -1,0 +1,51 @@
+function analyze_ecg_for_rmssd(file_path, resolution, fs)
+    % Load .mat file containing ECG data
+    ecg_data = load(file_path);
+
+    % Extract ECG signal and time vector
+    ecg_signal = ecg_data.ecg_signal;
+    time_vector = ecg_data.time_vector;
+
+    % Define filter specifications
+    low_cutoff = 0.5; % Low cutoff frequency (Hz)
+    high_cutoff = 50; % High cutoff frequency (Hz)
+    filter_order = 2; % Filter order (adjust as needed)
+
+    % Design low-pass Butterworth filter
+    [b_low, a_low] = butter(filter_order, high_cutoff / (fs / 2), 'low');
+
+    % Design high-pass Butterworth filter
+    [b_high, a_high] = butter(filter_order, low_cutoff / (fs / 2), 'high');
+
+    % Apply low-pass filter to remove high-frequency noise
+    ecg_signal_filtered = filtfilt(b_low, a_low, ecg_signal);
+
+    % Apply high-pass filter to remove baseline wander
+    ecg_signal_cleaned = filtfilt(b_high, a_high, ecg_signal_filtered);
+
+    % Calculate adaptive threshold as a percentage of signal amplitude
+    threshold_percentage = 0.25; % Adjust as needed
+    threshold = threshold_percentage * max(ecg_signal_cleaned);
+
+    % Perform R-peak detection on the cleaned ECG signal
+    [~, rpeaks] = findpeaks(ecg_signal_cleaned, 'MinPeakHeight', threshold, 'MinPeakDistance', round(0.6 * fs)); % Adjust MinPeakDistance based on sampling frequency
+
+    % Compute RR intervals in milliseconds
+    rr_intervals_ms = diff(time_vector(rpeaks)) * 1000; % Convert to milliseconds
+
+    % Compute RMSSD in milliseconds
+    rmssd_ms = sqrt(mean(diff(rr_intervals_ms).^2));
+
+    % Plot ECG signal with detected R-peaks
+    figure;
+    plot(time_vector, ecg_signal_cleaned);
+    hold on;
+    plot(time_vector(rpeaks), ecg_signal_cleaned(rpeaks), 'ro', 'MarkerSize', 10);
+    xlabel('Time (seconds)');
+    ylabel('ECG Signal');
+    title('Cleaned ECG Signal with Detected R-Peaks');
+    legend('ECG Signal', 'Detected R-Peaks');
+
+    % Display RMSSD in milliseconds
+    fprintf('RMSSD: %.2f ms\n', rmssd_ms);
+end
