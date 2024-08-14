@@ -1,0 +1,56 @@
+import matplotlib.pyplot as plt
+import networkx as nx
+import pandas as pd
+
+def analyze_network_centrality(data, output_path):
+    """
+    Analyze network centrality based on direct effects in a directed graph.
+
+    Parameters:
+    - data: dict, key is a tuple of (source, target) and value is the weight of the edge.
+    - output_path: str, path to save the centrality measures CSV file.
+    """
+    # Create a directed network graph
+    G = nx.DiGraph()
+
+    # Add edges with weights based on the direct effects
+    for (source, target), weight in data.items():
+        G.add_edge(source, target, weight=weight)
+
+    # Calculate centrality measures
+    degree_centrality = nx.degree_centrality(G)
+    closeness_centrality = nx.closeness_centrality(G)
+    betweenness_centrality = nx.betweenness_centrality(G)
+
+    # Combine the centrality measures into a DataFrame
+    centrality_df = pd.DataFrame({
+        "Degree Centrality": degree_centrality,
+        "Closeness Centrality": closeness_centrality,
+        "Betweenness Centrality": betweenness_centrality
+    })
+
+    # Save the centrality measures to a CSV file
+    centrality_df.to_csv(output_path, index_label='Variable')
+
+    # Scale node sizes based on degree centrality for visibility
+    node_sizes = [20000 * degree_centrality[node] for node in G]
+
+    # Draw the network
+    plt.figure(figsize=(14, 14))
+
+    # Draw nodes with sizes based on centrality
+    pos = nx.spring_layout(G)
+    nx.draw_networkx_nodes(G, pos, node_size=node_sizes, node_color='lightblue')
+
+    # Draw edges with colors based on weights (red for negative, blue for positive)
+    for (node1, node2, weight) in G.edges(data=True):
+        color = 'red' if weight['weight'] < 0 else 'blue'
+        nx.draw_networkx_edges(G, pos, edgelist=[(node1, node2)], width=abs(weight['weight']) * 10, alpha=0.7, edge_color=color)
+
+    # Draw labels
+    nx.draw_networkx_labels(G, pos, font_size=12, font_family="sans-serif", font_weight='bold')
+
+    # Adjust plot margins and display the plot
+    plt.margins(0.1)
+    plt.title('Network Centrality Analysis', fontsize=16)
+    plt.show()
